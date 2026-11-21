@@ -1,0 +1,35 @@
+{
+  "user_name": "পারভেজ",
+  "current_odo": 1070.0,
+  "current_soc": 2,
+  "last_charge_time": "2026-11-21T11:31:14.134415",
+  "active_cycle": null,
+  "records": [
+    {
+      "date": "21 Nov 2026, 11:31 AM",
+      "charge_time": "21 Nov, 11:31 AM",
+      "start_odo": 1050.0,
+      "end_odo": 1070.0,
+      "distance_km": 20.0,
+      "start_soc": 35,
+      "end_soc": 2,
+      "soc_used": 33,
+      "est_100_range": 60.6,
+      "km_per_pct": 0.61,
+      "completed_at": "2026-11-21T11:31:43.702918"
+    },
+    {
+      "date": "21 Nov 2026, 11:19 AM",
+      "charge_time": "21 Nov, 11:19 AM",
+      "start_odo": 1000.0,
+      "end_odo": 1050.0,
+      "distance_km": 50.0,
+      "start_soc": 100,
+      "end_soc": 35,
+      "soc_used": 65,
+      "est_100_range": 76.9,
+      "km_per_pct": 0.77,
+      "completed_at": "2026-11-21T11:19:29.019612"
+    }
+  ]
+}
