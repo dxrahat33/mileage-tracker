@@ -3,7 +3,12 @@ import requests
 import json
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+BD_TZ = timezone(timedelta(hours=6))
+
+def now_bd():
+    return datetime.now(BD_TZ)
 
 # ---------------- পেজ কনফিগারেশন ----------------
 st.set_page_config(
@@ -211,7 +216,7 @@ def reset_google_sheet():
     ws_records.append_row(RECORD_HEADERS)
 
 # ---------------- লাইভ ওয়েদার ফাংশন ----------------
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=600)
 def get_weather(lat=23.8583, lon=90.2667):
     """সাভার, ঢাকার লাইভ ওয়েদার (Open-Meteo API - কোনো কী লাগে না)"""
     try:
@@ -243,7 +248,7 @@ def get_weather(lat=23.8583, lon=90.2667):
         return "🌐 ওয়েদার আপডেট লোড করা যায়নি (অফলাইন)"
 
 def get_greeting():
-    hour = datetime.now().hour
+    hour = now_bd().hour
     if 5 <= hour < 12:
         return "শুভ সকাল"
     elif 12 <= hour < 16:
@@ -260,7 +265,9 @@ def time_ago_text(iso_time):
         return "এখনো চার্জ এন্ট্রি নেই"
     try:
         dt = datetime.fromisoformat(iso_time)
-        diff = datetime.now() - dt
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=BD_TZ)
+        diff = now_bd() - dt
         mins = int(diff.total_seconds() // 60)
         if mins < 1:
             return "এইমাত্র"
@@ -333,7 +340,7 @@ def entry_dialog():
         start_odo = st.number_input("বর্তমান ODO (কি.মি.)", min_value=0.0, value=float(data["current_odo"]), step=0.1, format="%g")
         
         if st.button("চার্জ এন্ট্রি সেভ করুন", type="primary", use_container_width=True):
-            now_iso = datetime.now().isoformat()
+            now_iso = now_bd().isoformat()
             data["current_soc"] = int(charge_soc)
             data["current_odo"] = round(float(start_odo), 1)
             data["last_charge_time"] = now_iso
@@ -378,10 +385,10 @@ def entry_dialog():
             else:
                 est_100_range = round((distance / soc_used) * 100, 1)
                 km_per_pct = round(distance / soc_used, 2)
-                now_iso = datetime.now().isoformat()
+                now_iso = now_bd().isoformat()
 
                 record = {
-                    "date": datetime.now().strftime("%d %b %Y, %I:%M %p"),
+                    "date": now_bd().strftime("%d %b %Y, %I:%M %p"),
                     "charge_time": datetime.fromisoformat(active["charge_time"]).strftime("%d %b, %I:%M %p"),
                     "start_odo": active["start_odo"],
                     "end_odo": round(float(end_odo), 1),
