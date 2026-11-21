@@ -142,6 +142,19 @@ def get_gsheet_workbook():
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
+    if "gcp_service_account" not in st.secrets:
+        raise RuntimeError(
+            "Missing [gcp_service_account] in Streamlit Secrets. "
+            "Add the Google service-account fields to .streamlit/secrets.toml "
+            "or Streamlit Cloud → App settings → Secrets."
+        )
+    if "sheet_url" not in st.secrets:
+        raise RuntimeError(
+            "Missing sheet_url in Streamlit Secrets. "
+            "Add the Google Sheets spreadsheet URL to .streamlit/secrets.toml "
+            "or Streamlit Cloud → App settings → Secrets."
+        )
+
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
