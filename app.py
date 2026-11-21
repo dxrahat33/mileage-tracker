@@ -1,7 +1,8 @@
 import streamlit as st
 import requests
 import json
-import os
+import gspread
+from google.oauth2.service_account import Credentials
 from datetime import datetime
 
 # ---------------- পেজ কনফিগারেশন ----------------
@@ -11,8 +12,6 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="collapsed"
 )
-
-DATA_FILE = "scooter_data.json"
 
 # ---------------- লাইট মোড ও মোবাইল UI স্টাইল ----------------
 st.markdown("""
@@ -26,7 +25,7 @@ st.markdown("""
     }
     header, footer, #MainMenu {visibility: hidden;}
 
-    /* উপরের অতিরিক্ত ফাঁকা জায়গা সরিয়ে মূল কনটেন্ট একেবারে ওপরে */
+    /* উপরের অতিরিক্ত ফাঁকা জায়গা সরিয়ে মূল কনটেন্ট একেবারে ওপরে */
     .block-container {
         padding-top: 0.5rem !important;
         padding-bottom: 1rem !important;
@@ -122,34 +121,86 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------- ডেটা লোড ও সেভ ফাংশন ----------------
-def default_data():
+# ---------------- Google Sheets কানেকশন ----------------
+RECORD_HEADERS = [
+    "date", "charge_time", "start_odo", "end_odo", "distance_km",
+    "start_soc", "end_soc", "soc_used", "est_100_range", "km_per_pct", "completed_at"
+]
+
+def default_state():
     return {
         "user_name": "পারভেজ",
         "current_odo": 0.0,
         "current_soc": 100,
         "last_charge_time": None,
-        "active_cycle": None,  # {"start_soc": int, "start_odo": float, "charge_time": str}
-        "records": []
+        "active_cycle": None
     }
 
-def load_data():
-    if os.path.exists(DATA_FILE):
+@st.cache_resource
+def get_gsheet_workbook():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    client = gspread.authorize(creds)
+    return client.open_by_url(st.secrets["sheet_url"])
+
+def get_or_create_worksheets():
+    wb = get_gsheet_workbook()
+    titles = [ws.title for ws in wb.worksheets()]
+
+    if "state" not in titles:
+        ws_state = wb.add_worksheet(title="state", rows=5, cols=2)
+        ws_state.update("A1", [[json.dumps(default_state(), ensure_ascii=False)]])
+    else:
+        ws_state = wb.worksheet("state")
+
+    if "records" not in titles:
+        ws_records = wb.add_worksheet(title="records", rows=1000, cols=15)
+        ws_records.append_row(RECORD_HEADERS)
+    else:
+        ws_records = wb.worksheet("records")
+
+    return ws_state, ws_records
+
+def load_all_data():
+    ws_state, ws_records = get_or_create_worksheets()
+    
+    raw_state = ws_state.acell("A1").value
+    if raw_state:
         try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+            state = json.loads(raw_state)
         except Exception:
-            return default_data()
-    return default_data()
+            state = default_state()
+    else:
+        state = default_state()
 
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    rows = ws_records.get_all_records()
+    state["records"] = list(reversed(rows))  # নতুন রেকর্ড সবার উপরে
+    return state
 
-# ---------------- লাইভ ওয়েদার ফাংশন ----------------
+def save_state_to_sheet(data):
+    ws_state, _ = get_or_create_worksheets()
+    state_only = {k: v for k, v in data.items() if k != "records"}
+    ws_state.update("A1", [[json.dumps(state_only, ensure_ascii=False)]])
+
+def append_record_to_sheet(record):
+    _, ws_records = get_or_create_worksheets()
+    row = [record[col] for col in RECORD_HEADERS]
+    ws_records.append_row(row)
+
+def reset_google_sheet():
+    ws_state, ws_records = get_or_create_worksheets()
+    ws_state.update("A1", [[json.dumps(default_state(), ensure_ascii=False)]])
+    ws_records.clear()
+    ws_records.append_row(RECORD_HEADERS)
+
+# ---------------- লাইভ ওয়েদার ফাংশন ----------------
 @st.cache_data(ttl=1800)
 def get_weather(lat=23.8583, lon=90.2667):
-    """সাভার, ঢাকার লাইভ ওয়েদার (Open-Meteo API - কোনো কী লাগে না)"""
+    """সাভার, ঢাকার লাইভ ওয়েদার (Open-Meteo API - কোনো কী লাগে না)"""
     try:
         url = (
             f"https://api.open-meteo.com/v1/forecast?"
@@ -161,22 +212,22 @@ def get_weather(lat=23.8583, lon=90.2667):
         
         weather_map = {
             0: ("☀️", "পরিষ্কার আকাশ"),
-            1: ("🌤️", "প্রায় পরিষ্কার"),
+            1: ("🌤️", "প্রায় পরিষ্কার"),
             2: ("⛅", "আংশিক মেঘলা"),
             3: ("☁️", "মেঘলা আকাশ"),
-            45: ("🌫️", "কুয়াশাচ্ছন্ন"),
-            48: ("🌫️", "ঘন কুয়াশা"),
-            51: ("🌦️", "গুঁড়ি গুঁড়ি বৃষ্টি"),
+            45: ("🌫️", "কুয়াশাচ্ছন্ন"),
+            48: ("🌫️", "ঘন কুয়াশা"),
+            51: ("🌦️", "গুঁড়ি গুঁড়ি বৃষ্টি"),
             61: ("🌧️", "হালকা বৃষ্টি"),
             63: ("🌧️", "মাঝারি বৃষ্টি"),
             65: ("⛈️", "ভারী বৃষ্টি"),
             80: ("🌦️", "বৃষ্টির সম্ভাবনা"),
             95: ("⛈️", "বজ্রসহ বৃষ্টি"),
         }
-        icon, desc = weather_map.get(code, ("🌤️", "স্বাভাবিক আবহাওয়া"))
-        return f"{icon} আজকের আবহাওয়া: {temp}°C, {desc}"
+        icon, desc = weather_map.get(code, ("🌤️", "স্বাভাবিক আবহাওয়া"))
+        return f"{icon} আজকের আবহাওয়া: {temp}°C, {desc}"
     except Exception:
-        return "🌐 ওয়েদার আপডেট লোড করা যায়নি (অফলাইন)"
+        return "🌐 ওয়েদার আপডেট লোড করা যায়নি (অফলাইন)"
 
 def get_greeting():
     hour = datetime.now().hour
@@ -211,6 +262,9 @@ def time_ago_text(iso_time):
     except Exception:
         return "-"
 
+def format_odo(value):
+    return f"{float(value):g}"
+
 # ---------------- সার্কুলার ব্যাটারি SVG ----------------
 def battery_ring_svg(percent):
     radius = 48
@@ -229,21 +283,29 @@ def battery_ring_svg(percent):
     </div>
     """
 
-# ---------------- স্টেট ইনিশিয়ালাইজ ----------------
-data = load_data()
+# ---------------- স্টেট ইনিশিয়ালাইজ ----------------
+if "app_data" not in st.session_state:
+    try:
+        st.session_state.app_data = load_all_data()
+    except Exception as e:
+        st.error(f"Google Sheets কানেক্ট করা যায়নি। অনুগ্রহ করে Secrets চেক করুন।\n\nError: {e}")
+        st.stop()
+
+data = st.session_state.app_data
+
 if "page" not in st.session_state:
     st.session_state.page = "home"
 
-# ---------------- ২-ধাপের এন্ট্রি ডায়ালগ ----------------
+# ---------------- ২-ধাপের এন্ট্রি ডায়ালগ ----------------
 @st.dialog("⚡ নতুন এন্ট্রি")
 def entry_dialog():
     active = data.get("active_cycle")
     
     if active:
-        st.info(f"চলমান সাইকেল: চার্জ দেওয়া হয়েছিল **{active['start_soc']}%** (ODO: **{active['start_odo']} কি.মি.**)")
+        st.info(f"চলমান সাইকেল: চার্জ দেওয়া হয়েছিল **{active['start_soc']}%** (ODO: **{format_odo(active['start_odo'])} কি.মি.**)")
         default_tab = 1
     else:
-        st.caption("প্রথমে চার্জ এন্ট্রি দিন, পরে রাইড শেষে ODO ও অবশিষ্ট চার্জ দিয়ে এন্ট্রি কমপ্লিট করুন।")
+        st.caption("প্রথমে চার্জ এন্ট্রি দিন, পরে রাইড শেষে ODO ও অবশিষ্ট চার্জ দিয়ে এন্ট্রি কমপ্লিট করুন।")
         default_tab = 0
 
     choice = st.radio(
@@ -255,7 +317,7 @@ def entry_dialog():
     if choice.startswith("🔋"):
         st.markdown("##### বর্তমান চার্জ লেভেল সেট করুন")
         charge_soc = st.number_input("চার্জের পর ব্যাটারি (%)", min_value=1, max_value=100, value=100, step=1)
-        start_odo = st.number_input("বর্তমান ODO (কি.মি.)", min_value=0.0, value=float(data["current_odo"]), step=0.1)
+        start_odo = st.number_input("বর্তমান ODO (কি.মি.)", min_value=0.0, value=float(data["current_odo"]), step=0.1, format="%g")
         
         if st.button("চার্জ এন্ট্রি সেভ করুন", type="primary", use_container_width=True):
             now_iso = datetime.now().isoformat()
@@ -267,21 +329,22 @@ def entry_dialog():
                 "start_odo": round(float(start_odo), 1),
                 "charge_time": now_iso
             }
-            save_data(data)
-            st.success("চার্জ এন্ট্রি সেভ হয়েছে! পরের বার রাইড শেষে ODO এন্ট্রি দিন।")
+            save_state_to_sheet(data)
+            st.success("চার্জ এন্ট্রি Google Sheet-এ সেভ হয়েছে! পরের বার রাইড শেষে ODO এন্ট্রি দিন।")
             st.rerun()
 
     else:
         if not active:
-            st.warning("আগে একটি 'চার্জ এন্ট্রি' দেওয়া নেই! অনুগ্রহ করে প্রথমে চার্জ এন্ট্রি দিন।")
+            st.warning("আগে একটি 'চার্জ এন্ট্রি' দেওয়া নেই! অনুগ্রহ করে প্রথমে চার্জ এন্ট্রি দিন।")
             return
 
         st.markdown("##### রাইড শেষে বর্তমান তথ্য দিন")
         end_odo = st.number_input(
-            f"বর্তমান ODO (আগের ODO: {active['start_odo']} কি.মি.)",
+            f"বর্তমান ODO (আগের ODO: {format_odo(active['start_odo'])} কি.মি.)",
             min_value=float(active["start_odo"]),
             value=float(active["start_odo"]),
-            step=0.1
+            step=0.1,
+            format="%g"
         )
         end_soc = st.number_input(
             f"অবশিষ্ট ব্যাটারি % (শুরু ছিল: {active['start_soc']}%)",
@@ -296,9 +359,9 @@ def entry_dialog():
             soc_used = int(active["start_soc"]) - int(end_soc)
 
             if distance <= 0:
-                st.error("নতুন ODO অবশ্যই আগের ODO-এর চেয়ে বেশি হতে হবে।")
+                st.error("নতুন ODO অবশ্যই আগের ODO-এর চেয়ে বেশি হতে হবে।")
             elif soc_used <= 0:
-                st.error("অবশিষ্ট ব্যাটারি অবশ্যই শুরুর চার্জের চেয়ে কম হতে হবে।")
+                st.error("অবশিষ্ট ব্যাটারি অবশ্যই শুরুর চার্জের চেয়ে কম হতে হবে।")
             else:
                 est_100_range = round((distance / soc_used) * 100, 1)
                 km_per_pct = round(distance / soc_used, 2)
@@ -318,33 +381,30 @@ def entry_dialog():
                     "completed_at": now_iso
                 }
 
+                append_record_to_sheet(record)
                 data["records"].insert(0, record)  # নতুন রেকর্ড সবার উপরে
                 data["current_odo"] = round(float(end_odo), 1)
                 data["current_soc"] = int(end_soc)
                 data["active_cycle"] = None  # সাইকেল কমপ্লিট
-                save_data(data)
-                st.success(f"রেকর্ড সেভ হয়েছে! ১০০% চার্জে সম্ভাব্য রেঞ্জ: {est_100_range} কি.মি.")
+                save_state_to_sheet(data)
+                st.success(f"রেকর্ড Google Sheet-এ সেভ হয়েছে! ১০০% চার্জে সম্ভাব্য রেঞ্জ: {est_100_range} কি.মি.")
                 st.rerun()
 
 # ==================== ১. হোম পেজ ====================
 if st.session_state.page == "home":
-    # উপরে গ্রেটিংস + ওয়েদার আপডেট
     st.markdown(f'<div class="greeting-title">{get_greeting()}, {data["user_name"]}! ⚡</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="weather-box">{get_weather()}</div>', unsafe_allow_html=True)
 
-    # গড় রেঞ্জ হিসাব (যদি আগের রেকর্ড থাকে)
     if data["records"]:
-        avg_100_range = sum(r["est_100_range"] for r in data["records"]) / len(data["records"])
+        avg_100_range = sum(float(r["est_100_range"]) for r in data["records"]) / len(data["records"])
         est_remaining_km = round(avg_100_range * (data["current_soc"] / 100), 1)
         range_text = f"{est_remaining_km} কি.মি."
     else:
-        range_text = "ডেটা প্রয়োজন"
+        range_text = "ডেটা প্রয়োজন"
 
-    # রানিং স্ট্যাটাস / সর্বশেষ চার্জ
     last_charge_str = time_ago_text(data["last_charge_time"])
     cycle_status = "চলমান (ODO এন্ট্রি বাকি)" if data["active_cycle"] else "নতুন চার্জের জন্য প্রস্তুত"
 
-    # মাঝখানে আপডেটস কার্ড
     st.markdown('<div class="update-card">', unsafe_allow_html=True)
     st.markdown("<div style='font-size:17px; font-weight:700; margin-bottom:10px;'>আপডেটস</div>", unsafe_allow_html=True)
     
@@ -357,7 +417,7 @@ if st.session_state.page == "home":
             <div class="stat-value">{last_charge_str}</div>
             
             <div class="stat-label">বর্তমান ODO:</div>
-            <div class="stat-value">{data['current_odo']} কি.মি.</div>
+            <div class="stat-value">{format_odo(data['current_odo'])} কি.মি.</div>
             
             <div class="stat-label">সম্ভাব্য রেঞ্জ ({data['current_soc']}%):</div>
             <div class="stat-value">{range_text}</div>
@@ -366,7 +426,6 @@ if st.session_state.page == "home":
     st.caption(f"স্ট্যাটাস: {cycle_status}")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # নিচে গ্লোয়িং এন্ট্রি বাটন
     btn_label = "+ রাইড শেষ এন্ট্রি দিন (ধাপ ২)" if data["active_cycle"] else "+ নতুন এন্ট্রি"
     if st.button(btn_label, type="primary", use_container_width=True):
         entry_dialog()
@@ -379,60 +438,57 @@ elif st.session_state.page == "record":
     if not records:
         st.info("এখনো কোনো কমপ্লিট রেকর্ড নেই। হোম পেজ থেকে চার্জ এবং রাইড এন্ট্রি সম্পন্ন করুন।")
     else:
-        # সামারি মেট্রিক্স
-        total_km = round(sum(r["distance_km"] for r in records), 1)
-        avg_range = round(sum(r["est_100_range"] for r in records) / len(records), 1)
+        total_km = round(sum(float(r["distance_km"]) for r in records), 1)
+        avg_range = round(sum(float(r["est_100_range"]) for r in records) / len(records), 1)
         
         m1, m2 = st.columns(2)
-        m1.metric("মোট চালানো হয়েছে", f"{total_km} কি.মি.")
-        m2.metric("গড় রেঞ্জ (১০০%)", f"{avg_range} কি.মি.")
+        m1.metric("মোট চালানো হয়েছে", f"{total_km} কি.মি.")
+        m2.metric("গড় রেঞ্জ (১০০%)", f"{avg_range} কি.মি.")
         st.divider()
 
-        # শর্ট লিস্ট — চাপলে ডিটেইলস খুলবে, আবার চাপলে বন্ধ হবে
-        for idx, rec in enumerate(records):
-            short_title = f"📅 {rec['date'].split(',')[0]}  |  🛣️ {rec['distance_km']} কি.মি.  |  🔋 -{rec['soc_used']}%  |  ⚡ {rec['est_100_range']} কি.মি."
+        for rec in records:
+            short_title = f"📅 {str(rec['date']).split(',')[0]}  |  🛣️ {rec['distance_km']} কি.মি.  |  🔋 -{rec['soc_used']}%  |  ⚡ {rec['est_100_range']} কি.মি."
             with st.expander(short_title, expanded=False):
                 d1, d2 = st.columns(2)
                 with d1:
-                    st.write(f"**শুরুর ODO:** {rec['start_odo']} কি.মি.")
-                    st.write(f"**শেষের ODO:** {rec['end_odo']} কি.মি.")
+                    st.write(f"**শুরুর ODO:** {format_odo(rec['start_odo'])} কি.মি.")
+                    st.write(f"**শেষের ODO:** {format_odo(rec['end_odo'])} কি.মি.")
                     st.write(f"**মোট দূরত্ব:** {rec['distance_km']} কি.মি.")
                 with d2:
                     st.write(f"**ব্যাটারি খরচ:** {rec['soc_used']}% ({rec['start_soc']}% → {rec['end_soc']}%)")
                     st.write(f"**১০০% এ সম্ভাব্য রেঞ্জ:** {rec['est_100_range']} কি.মি.")
                     st.write(f"**প্রতি ১% চার্জে:** {rec['km_per_pct']} কি.মি.")
-                st.caption(f"চার্জের সময়: {rec['charge_time']}  •  শেষ হয়েছে: {rec['date']}")
+                st.caption(f"চার্জের সময়: {rec['charge_time']}  •  শেষ হয়েছে: {rec['date']}")
 
 # ==================== ৩. সেটিংস পেজ ====================
 elif st.session_state.page == "settings":
     st.markdown('<div class="greeting-title" style="font-size:26px;">⚙️ সেটিংস</div>', unsafe_allow_html=True)
 
-    # প্রোফাইল ও ODO সেটিংস
     with st.container(border=True):
         st.subheader("স্কুটার ও প্রোফাইল সেটিংস")
         new_name = st.text_input("আপনার নাম", value=data["user_name"])
-        new_odo = st.number_input("বর্তমান ODO সেট করুন (কি.মি.)", min_value=0.0, value=float(data["current_odo"]), step=0.1)
+        new_odo = st.number_input("বর্তমান ODO সেট করুন (কি.মি.)", min_value=0.0, value=float(data["current_odo"]), step=0.1, format="%g")
         new_soc = st.number_input("বর্তমান ব্যাটারি %", min_value=0, max_value=100, value=int(data["current_soc"]), step=1)
 
         if st.button("সেটিংস সেভ করুন", type="primary", use_container_width=True):
             data["user_name"] = new_name.strip() or "রাইডার"
             data["current_odo"] = round(float(new_odo), 1)
             data["current_soc"] = int(new_soc)
-            save_data(data)
-            st.success("সেটিংস আপডেট হয়েছে!")
+            save_state_to_sheet(data)
+            st.success("সেটিংস Google Sheet-এ আপডেট হয়েছে!")
             st.rerun()
 
     st.write("")
 
-    # রিসেট সেকশন
     with st.container(border=True):
         st.subheader("⚠️ অ্যাপ রিসেট")
-        st.caption("রিসেট করলে সব ট্রিপ রেকর্ড, চলমান সাইকেল এবং ODO মুছে যাবে।")
+        st.caption("রিসেট করলে Google Sheet-এর সব ট্রিপ রেকর্ড, চলমান সাইকেল এবং ODO মুছে যাবে।")
         confirm_reset = st.checkbox("আমি নিশ্চিত যে পুরো অ্যাপ রিসেট করতে চাই")
         
         if st.button("পুরো অ্যাপ রিসেট করুন", type="secondary", use_container_width=True, disabled=not confirm_reset):
-            save_data(default_data())
-            st.success("অ্যাপ সম্পূর্ণ রিসেট হয়েছে!")
+            reset_google_sheet()
+            st.session_state.app_data = load_all_data()
+            st.success("অ্যাপ সম্পূর্ণ রিসেট হয়েছে!")
             st.rerun()
 
 # ==================== বটম ন্যাভিগেশন বার ====================
